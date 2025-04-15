@@ -1,7 +1,6 @@
 from abc import ABC
 
 import numpy as np
-import math
 from random import random
 
 import vedo.utils as vu
@@ -92,11 +91,15 @@ class Camera:
         return ambient + diffuse + specular
 
     def closest(self, point):
-        # find cell_id nearest to the point
+        '''
+        Finds cell_id nearest the point
+        :param point:
+        :return: ndarray
+        '''
         nearest = self.mesh_data.closest_point(point, return_point_id=True)
         return nearest
 
-    def get_ray(self, x, y):
+    def get_ray_perspective(self, x, y):
         '''
         Constructs a Ray originating from camera and pointing towards pixel (x, y)
         :param x: pixel x value
@@ -123,10 +126,20 @@ class Camera:
 
         return Ray(ray_origin, ray_direction)
 
-    def gradient(self, ray_direction: np.array):
+    def gradient(self, ray_direction: np.array, color_1: np.array, color_2: np.array):
+        '''
+        Linear gradient from color_1 to color_2 based on ray_direction
+        :param ray_direction: nparray
+        :param color_1: nparray of rgb values
+        :param color_2: nparray of rgb values
+        :return:
+        '''
+        # find unit vector direction
         unit_direction = normalize(ray_direction)
+        # create a blending coefficient for color gradient
         blend = 0.5 * (unit_direction[1] + 1)
-        return (1 - blend) * np.array([0, 1, 1]) + blend * np.array([0, 0, 1])
+        # return a
+        return (1 - blend) * color_1 + blend * color_2
 
     def lambert(self, hit_point, sphere, light_source: np.array, light_intensity):
         normal = normalize(hit_point - sphere.center)
@@ -135,67 +148,84 @@ class Camera:
         return sphere.color * l
 
     def load_mesh(self, filename):
-        # Load mesh using vedo
+        '''
+        Load mesh using Vedo
+        :param filename:
+        :return:
+        '''
         self.mesh_data = Mesh(filename).scale(0.1, reset=True, origin=False)
         self.mesh_data.rotate_x(180)
         self.mesh_data.compute_normals(cells=True, points=False)
-        '''
-        v_mesh = Mesh(filename)
-        self.mesh_data = {
-            'vertices': v_mesh.points,
-            'faces': v_mesh.cells
-        }'''
 
     def ray_intersect(self, direction):
+        '''
+        Finds any intersections with the loaded mesh to
+        :param direction: ndarray
+        :return: ndarray | tuple[ndarray, ndarray]
+        '''
         return self.mesh_data.intersect_with_line(self.camera_position, direction, return_ids=True)
 
     def rand_sample(self):
         '''
         vector to a random point in [-.5,-.5]-[+.5,+.5] unit square.
-        :return: 3-element vector
+        :return: ndarray of size [3,]
         '''
         return np.array([random() - 0.5, random() - 0.5, 0])
 
     def render_scene(self, obj_mat, aa_samples):
+        '''
+        Render the scene
+        :param obj_mat:
+        :param aa_samples:
+        :return: ndarray of size img_height x img_width x rgb
+        '''
         # Initial pixel colors of the scene (final output image)
         pixel_colors = np.zeros((self.image_height_scaled, self.image_width_scaled, 3))
-        #image = np.zeros((self.image_height, self.image_width, 3))
-        closest_thing = obj_mat
-        if aa_samples == 0:
+
+        # check aa_samples for correct loop
+        if aa_samples <= 0:
             aa_samples = 1
 
+        # loop through every pixel
         for y in range(self.image_height_scaled):
-            # print("Line %d of %d" % (y + 1, image_height_scaled))
             for x in range(self.image_width_scaled):
-                pixel_color = np.zeros((1,3))
 
                 for sample in range(aa_samples):
                     # create a new Ray
-                    ray = self.get_ray(x, y)
+                    ray = self.get_ray_perspective(x, y)
 
+                    # get ray-mesh intersection with vedo
                     cell_pos, cell_id = self.ray_intersect(ray.direction)
 
+                    # ray intersects mesh
                     if 0 < len(cell_id):
-                        # find closest point on line
-                        # find closest cell_id given closest point
-
+                        # find the closest point to the camera on the ray
                         distance, closest_pt = vu.closest(self.camera_position, cell_pos)
-                        #print(closest_pt)
-                        cell_id = self.mesh_data.closest_point(closest_pt, return_cell_id=True)
-                        #cell_id = self.mesh_data.connected_cells(vtx_id)
-                        #cell_id = self.closest(closest_pt)
-                        #print(cell_id)
 
-                        shading = obj_mat.color * self.blinn_phong(
+                        # given a closest point, find the closest cell_id
+                        cell_id = self.mesh_data.closest_point(closest_pt, return_cell_id=True)
+
+                        # compute shading for mesh
+                        shading = self.blinn_phong(
                             cell_id, closest_pt, obj_mat, self.light_position, self.light_color, self.light_intensity)
-                        pixel_color += shading
+
+                        # update pixel rgb value to shaded color
                         pixel_colors[y][x] = clamp(shading, 0, 1)
                     else:
+                        # update pixel rgb value to background color
                         pixel_colors[y][x] = self.background_color
 
+        # return the image
         return pixel_colors
 
     def set_light(self, light_position, light_intensity, light_color):
+        '''
+        Change the lighting of the scene
+        :param light_position:
+        :param light_intensity:
+        :param light_color:
+        :return: None
+        '''
         self.light_position = np.array(light_position)
         self.light_intensity = light_intensity
         self.light_color = np.array(light_color)

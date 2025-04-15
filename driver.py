@@ -34,7 +34,7 @@ if __name__ == "__main__":
     light_model = Point([5, 3, 0], c='b').scale(5)
 
     while(True):
-        print("Choices:\n (0) Choose model\n (1) View model\n (2) Render Model\n (3) Exit\n")
+        print("Choices:\n (0) Choose model\n (1) View scene\n (2) Render scene\n (3) Exit\n")
         choice = input()
         if choice =="0":
             print("Path to mesh: ")

@@ -1,10 +1,10 @@
 from abc import ABC
-
-import numpy as np
 from random import random
-
+import numpy as np
+import trimesh
+import PIL.Image
 import vedo.utils as vu
-from vedo import Mesh, pointcloud
+from vedo import Mesh
 
 def normalize(v):
     norm = np.linalg.norm(v)
@@ -32,13 +32,13 @@ class Matter(object):
         raise NotImplementedError("Please Implement this method")
 
 
-class Trimesh(Matter, ABC):
+class Mesh_mat(Matter, ABC):
     def __init__(self, color, ka, kd, ks, shininess):
         self.color = np.array(color)    # RGB color
         self.ka = ka  # Ambient coefficient
         self.kd = kd  # Diffuse coefficient
         self.ks = ks  # Specular coefficient
-        self.shininess = shininess  # he shininess factor for specular highlights
+        self.shininess = shininess  # Shininess factor for specular highlights
 
 class Ray:
     def __init__(self, origin, direction):
@@ -55,9 +55,7 @@ class Camera:
         self.camera_position = camera_position
         self.image_width = image_width
         self.image_height = image_height
-        self.direction = None
-        self.focus_distance = None
-        self.background_color = [0.3, 0.3, 0.3]
+        self.background_color = np.zeros(3)
 
         # Image plane definitions
         self.image_plane_height = 2.0
@@ -73,22 +71,6 @@ class Camera:
         self.light_position = None
         self.light_intensity = None
         self.light_color = None
-
-    def blinn_phong(self, cell_id, hit_point, matter, light_source: np.ndarray, light_color: np.ndarray, light_intensity):
-        # compute vectors
-        normal = np.array(normalize(hit_point - self.mesh_data.cell_normals[cell_id]))
-        light_direction = np.array(normalize(light_source - hit_point))
-        half_vector = np.array(normalize(self.camera_position + light_source))
-
-        # ambient component
-        ambient = matter.ka * matter.color * light_color * light_intensity
-        # diffuse component
-        diffuse = matter.kd * light_intensity * max(0, np.dot(normal, light_direction)) * light_color
-
-        # specular component
-        specular = matter.ks * light_intensity * light_color * pow(max(0, np.dot(normal, half_vector)), matter.shininess)
-
-        return ambient + diffuse + specular
 
     def closest(self, point):
         '''
@@ -147,7 +129,12 @@ class Camera:
         l = sphere.kd * light_intensity * max(0, np.dot(normal, light_direction))
         return sphere.color * l
 
-    def load_mesh(self, filename):
+    def load_mesh_trimesh(self, filename:str):
+        # load mesh
+        file = filename
+        self.mesh_data = trimesh.load(file)
+
+    def load_mesh_vedo(self, filename):
         '''
         Load mesh using Vedo
         :param filename:
@@ -172,13 +159,56 @@ class Camera:
         '''
         return np.array([random() - 0.5, random() - 0.5, 0])
 
-    def render_scene(self, obj_mat, aa_samples):
-        '''
-        Render the scene
-        :param obj_mat:
-        :param aa_samples:
-        :return: ndarray of size img_height x img_width x rgb
-        '''
+    def render_scene_vector(self, obj_mat, rotation_queue):
+        # define image properties
+        image_resolution = np.array([self.image_height, self.image_width])
+        fov = 60 * (image_resolution / image_resolution.max())
+
+        # create a trimesh scene and create a camera for the scene
+        scene = self.mesh_data.scene()
+        scene.camera.resolution = image_resolution
+        scene.camera.fov = fov
+
+        # calculate camera vectors
+        origins, vectors, pixels = scene.camera_rays()
+
+        # make an embreex object for ray-mesh queries
+        embreex_obj = trimesh.ray.ray_pyembree.RayMeshIntersector(self.mesh_data)
+
+        # rotate the mesh
+        for user_transform in rotation_queue:
+            self.mesh_data.apply_transform(user_transform)
+
+        # update camera position from trimesh scene
+        self.camera_position = scene.camera_transform[:3, 3]
+
+        # ray-mesh vector queries
+        points, index_ray, index_tri = embreex_obj.intersects_location(
+            origins, vectors, multiple_hits=False
+        )
+
+        # find pixel locations of hits
+        pixel_ray = pixels[index_ray]
+
+        # for each hit, find the unit normals of each face
+        normals = self.mesh_data.face_normals[index_tri]
+
+        # create numpy array that represents RGB image
+        img_array = np.zeros((scene.camera.resolution[0], scene.camera.resolution[1], 3))
+
+        # blinn-phong shading for pixel locations
+        self.shading_iterative(img_array, pixel_ray, obj_mat, normals)
+        shade_int = (img_array * 255).round().astype(np.uint8)
+
+        # create a PIL image
+        img = PIL.Image.fromarray(shade_int, mode='RGB')
+
+        # show the resulting image
+        img.show()
+        img.save("output/render" + "_color.png", format="PNG")
+
+    def render_scene_iterative(self, obj_mat, aa_samples):
+        # TODO Add PIL instead of returning array
         # Initial pixel colors of the scene (final output image)
         pixel_colors = np.zeros((self.image_height_scaled, self.image_width_scaled, 3))
 
@@ -206,7 +236,7 @@ class Camera:
                         cell_id = self.mesh_data.closest_point(closest_pt, return_cell_id=True)
 
                         # compute shading for mesh
-                        shading = self.blinn_phong(
+                        shading = self.shading_single_pass(
                             cell_id, closest_pt, obj_mat, self.light_position, self.light_color, self.light_intensity)
 
                         # update pixel rgb value to shaded color
@@ -229,3 +259,35 @@ class Camera:
         self.light_position = np.array(light_position)
         self.light_intensity = light_intensity
         self.light_color = np.array(light_color)
+
+    def shading_iterative(self, image_array, pixel_rays, material, normals):
+
+        hv = (self.camera_position + self.light_position) / np.linalg.norm(self.camera_position + self.light_position)
+
+        ambient = material.ka * (material.color / 255) * self.light_intensity * (self.light_color / 255)
+        diffuse_coeff = material.kd * self.light_intensity
+        specular_coeff = material.ks * self.light_intensity
+
+        for i in range(len(pixel_rays)):
+            row = int(pixel_rays[i, 0])  # y-coordinate
+            col = int(pixel_rays[i, 1])  # x-coordinate
+
+            diffuse = diffuse_coeff * np.maximum(0, np.dot(normals[i], self.light_position))
+            specular = specular_coeff * pow(np.maximum(0, np.dot(normals[i], hv)), material.shininess)
+
+            image_array[row, col] = ambient + diffuse + specular
+
+    def shading_single_pass(self, cell_id, hit_point, matter, light_source: np.ndarray, light_color: np.ndarray, light_intensity):
+        # compute vectors
+        normal = np.array(normalize(hit_point - self.mesh_data.cell_normals[cell_id]))
+        light_direction = np.array(normalize(light_source - hit_point))
+        half_vector = np.array(normalize(self.camera_position + light_source))
+
+        # ambient component
+        ambient = matter.ka * matter.color * light_intensity * light_color
+        # diffuse component
+        diffuse = matter.kd * light_intensity * max(0, np.dot(normal, light_direction)) * light_color
+        # specular component
+        specular = matter.ks * light_intensity * pow(max(0, np.dot(normal, half_vector)), matter.shininess) * light_color
+
+        return ambient + diffuse + specular
